@@ -1,0 +1,9 @@
+ultralytics
+supervision<0.31
+opencv-python
+pandas
+numpy
+streamlit
+altair
+openpyxl
+imageio-ffmpeg
