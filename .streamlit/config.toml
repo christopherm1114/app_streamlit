@@ -1,0 +1,19 @@
+# Tema visual de la interfaz (sistema de diseño "dashboard técnico oscuro").
+# Paleta slate + verde de estado; Fira Sans para texto y Fira Code para datos/código.
+
+[theme]
+base = "dark"
+primaryColor = "#22C55E"               # Acento / CTA (verde de estado)
+backgroundColor = "#0F172A"            # Fondo principal
+secondaryBackgroundColor = "#1B2336"   # Tarjetas, inputs, tablas
+textColor = "#F8FAFC"
+borderColor = "#334155"
+linkColor = "#4ADE80"
+baseRadius = "0.6rem"
+showWidgetBorder = true
+font = "Fira Sans:https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400;500;600;700&display=swap"
+codeFont = "Fira Code:https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&display=swap"
+
+[theme.sidebar]
+backgroundColor = "#111A2E"
+secondaryBackgroundColor = "#1B2336"

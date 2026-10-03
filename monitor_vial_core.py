@@ -31,12 +31,19 @@ warnings.filterwarnings("ignore", category=FutureWarning)   # Aviso de deprecaci
 # =====================================================================
 # Constantes de la escena (cámara de la avenida con parterre)
 # =====================================================================
+# Subconjunto de clases COCO que interesan (id COCO → nombre). YOLO solo devuelve estas.
 CLASES = {0: "persona", 1: "bicicleta", 2: "auto", 3: "moto", 5: "bus", 7: "camion"}
 VEHICULOS = {1, 2, 3, 5, 7}
 COLOR_ALERTA = (72, 73, 227)                      # Rojo (BGR) reservado para las alertas
 RES_BASE = (704, 480)                             # Resolución en la que se dibujaron las ROI
 
-# ROI en la resolución base 704x480 (se escalan a la resolución real del video)
+# ROI en la resolución base 704x480 (se escalan a la resolución real del video).
+#   nombre    → etiqueta legible.
+#   sentido   → vector (dx, dy) en píxeles del sentido de circulación permitido; None = sin control de contravía.
+#   t_max     → segundos máximos de permanencia antes de generar alerta.
+#   velocidad → True si la ROI está dentro de la zona calibrada para medir velocidad.
+#   color     → color BGR con el que se dibuja la ROI.
+#   poligono  → vértices (x, y) del polígono de la zona.
 ROIS_BASE = {
     "A": {"nombre": "A carril cercano", "sentido": (0.918, 0.397), "t_max": 10.0, "velocidad": True,
           "color": (214, 120, 42),
@@ -49,10 +56,14 @@ ROIS_BASE = {
           "poligono": [(180, 198), (395, 201), (335, 222), (175, 230)]},
 }
 
-# Calibración de velocidad: base de los 4 garrafones en 1920x1080 y su posición real (m)
+# Calibración de velocidad: base de los 4 garrafones en 1920x1080 y su posición real (m).
+# Con estos 4 pares de puntos se calcula una homografía que lleva píxeles del suelo a metros
+# sobre el plano de la calzada (vista "desde arriba"), donde ya se pueden medir distancias reales.
 GARRAFONES_1080 = np.float32([[471, 496], [910, 512], [1262, 1057], [1742, 709]])   # G1, G2, G3, G4
 GARRAFONES_MUNDO = np.float32([[0, 0], [7.75, 0], [0, 14.75], [7.75, 14.85]])
 
+# Paleta indexada por id de clase COCO (posición 0 = persona, 1 = bicicleta, 2 = auto, ...).
+# Los índices 4 y 6 no se usan (gris de relleno).
 PALETA_CLASES = sv.ColorPalette.from_hex(
     ["#e87ba4", "#008300", "#2a78d6", "#eb6834", "#888888", "#eda100", "#888888", "#1baf7a"])
 
@@ -62,19 +73,24 @@ PALETA_CLASES = sv.ColorPalette.from_hex(
 # =====================================================================
 @dataclass
 class Parametros:
-    modelo: str = "yolo11s.pt"
-    conf: float = 0.25
-    imgsz: int = 704
+    # --- Detección ---
+    modelo: str = "yolo11s.pt"          # Pesos de YOLO11 (n / s / m)
+    conf: float = 0.25                  # Confianza mínima de una detección
+    imgsz: int = 704                    # Tamaño de entrada de la red
     salto_frames: int = 2               # Procesar 1 de cada N frames
+    # --- Conteo y visitas ---
     k_persistencia: int = 3             # Frames seguidos dentro de la ROI para contar
     tolerancia_salida: int = 8          # Frames fuera de la ROI para cerrar la visita
+    # --- Dirección / contravía ---
     ventana: int = 8                    # Posiciones del historial (dirección y velocidad)
     min_desplazamiento_base: float = 12 # px a 704x480 para evaluar la dirección
-    umbral_cos_contra: float = -0.5
-    k_contravia: int = 4
-    umbral_conductor: float = 0.30
+    umbral_cos_contra: float = -0.5     # cos < -0.5 → se mueve a más de 120° del sentido permitido
+    k_contravia: int = 4                # Evaluaciones seguidas en contra para confirmar la contravía
+    # --- Filtro de conductores ---
+    umbral_conductor: float = 0.30      # Fracción de la caja de la persona cubierta por la moto/bici
+    # --- Velocidad ---
     limite_velocidad: float = 50.0      # km/h
-    zona_calibrada_y: tuple = (-3.0, 15.0)
+    zona_calibrada_y: tuple = (-3.0, 15.0)  # Rango (m) del plano calibrado donde la homografía es fiable
     zona_calibrada_x: tuple = (-1.0, 8.8)
     t_max: dict = field(default_factory=lambda: {"A": 10.0, "B": 10.0, "C": 6.0})
     rois_activas: tuple = ("A", "B", "C")
@@ -91,25 +107,36 @@ class MonitorROI:
         self.clave, self.nombre, self.color = clave, cfg["nombre"], cfg["color"]
         self.t_max = sistema.p.t_max.get(clave, cfg["t_max"])
         self.poligono = cfg["poligono"]
+        # Un objeto está "dentro" si el punto inferior central de su caja (donde toca el suelo)
+        # cae en el polígono; así la perspectiva no hace que la parte alta de un camión "invada" otra ROI.
         self.zona = sv.PolygonZone(polygon=cfg["poligono"].astype(np.int64),
                                    triggering_anchors=(sv.Position.BOTTOM_CENTER,))
         self.sentido = None if cfg["sentido"] is None else np.array(cfg["sentido"]) / np.linalg.norm(cfg["sentido"])
         self.mide_velocidad = cfg.get("velocidad", False)
-        self.racha = defaultdict(int)
-        self.inicio_racha, self.ultimo_dentro = {}, {}
-        self.contados, self.conteo_clase = set(), Counter()
-        self.visitas_activas, self.visitas = {}, []
-        self.contra_racha = defaultdict(int)
+
+        # --- Estado por ID de tracking ---
+        self.racha = defaultdict(int)                      # Frames procesados seguidos dentro de la ROI
+        self.inicio_racha, self.ultimo_dentro = {}, {}     # Frame donde empezó la racha / último frame visto dentro
+        self.contados, self.conteo_clase = set(), Counter()  # IDs ya contados (sin doble conteo) y conteo por clase
+        self.visitas_activas, self.visitas = {}, []        # Visitas en curso (por ID) y visitas cerradas
+        self.contra_racha = defaultdict(int)               # Evaluaciones seguidas en sentido contrario
+        # IDs que ya dispararon cada tipo de alerta (cada alerta se emite una sola vez por ID)
         self.en_contravia, self.alerta_permanencia, self.alerta_velocidad = set(), set(), set()
-        self.velocidad_actual = {}
-        self.ocupacion = 0
+        self.velocidad_actual = {}                         # Velocidad mediana actual por ID (para la etiqueta)
+        self.ocupacion = 0                                 # Objetos dentro de la ROI en el frame actual
 
     def actualizar(self, det, idx, clase_de, historial, alertas):
+        """Actualiza el estado de la ROI con las detecciones `det` del frame `idx`.
+
+        `historial[tid]` es una deque de (frame, x, y) con las últimas posiciones del ID;
+        las alertas nuevas se añaden a la lista compartida `alertas`.
+        """
         p, fps = self.s.p, self.s.fps
         t = idx / fps
         dentro = self.zona.trigger(det) if len(det) else np.array([], dtype=bool)
         anclas = det.get_anchors_coordinates(sv.Position.BOTTOM_CENTER) if len(det) else []
         ids_dentro = set()
+        # ---- Recorre solo los objetos que están dentro del polígono ----
         for k in np.where(dentro)[0]:
             tid = int(det.tracker_id[k])
             clase = clase_de(tid)
@@ -141,25 +168,32 @@ class MonitorROI:
                                 "id": tid, "clase": clase, "detalle": f"{perm:.0f} s en {self.nombre}"})
 
             h = historial[tid]
-            # Velocidad en la zona calibrada
+            # Velocidad en la zona calibrada: distancia en metros (vía homografía) entre la posición
+            # más antigua y la más reciente de la ventana, dividida por el tiempo transcurrido.
             if self.mide_velocidad and clase != "persona" and len(h) >= p.ventana:
                 v = self.s.velocidad_kmh(h[0][1:], h[-1][1:], (h[-1][0] - h[0][0]) / fps)
                 if v is not None:
                     visita["velocidades"].append(v)
+                    # La mediana de las muestras amortigua el ruido del tracking (saltos de la caja).
                     if len(visita["velocidades"]) >= 3:
                         self.velocidad_actual[tid] = float(np.median(visita["velocidades"]))
                     mediana = float(np.median(visita["velocidades"]))
+                    # Se exigen ≥5 muestras antes de alertar, para no disparar con una medición aislada.
                     if len(visita["velocidades"]) >= 5 and mediana > p.limite_velocidad and tid not in self.alerta_velocidad:
                         self.alerta_velocidad.add(tid)
                         alertas.append({"t_s": round(t, 2), "frame": idx, "tipo": "exceso_velocidad", "roi": self.clave,
                                         "id": tid, "clase": clase, "detalle": f"{clase} a {mediana:.0f} km/h"})
 
             # Contravía: coseno entre el desplazamiento reciente y el sentido permitido
+            #   cos ≈ +1 → va a favor;  cos ≈ -1 → va exactamente en contra.
             if self.sentido is not None and clase != "persona" and tid not in self.en_contravia and len(h) >= p.ventana // 2:
                 d = np.array(h[-1][1:]) - np.array(h[0][1:])
                 dist = np.linalg.norm(d)
+                # Objetos casi quietos no se evalúan: su "dirección" sería solo ruido de la caja.
                 if dist >= self.s.min_desplazamiento:
                     cos = float(d @ self.sentido) / dist
+                    # Histéresis: suma si va en contra, reinicia solo si va claramente a favor
+                    # (los movimientos laterales, 0 ≥ cos ≥ umbral, no cambian la racha).
                     if cos < p.umbral_cos_contra:
                         self.contra_racha[tid] += 1
                     elif cos > 0:
@@ -170,19 +204,25 @@ class MonitorROI:
                         alertas.append({"t_s": round(t, 2), "frame": idx, "tipo": "contravia", "roi": self.clave,
                                         "id": tid, "clase": clase, "detalle": f"{clase} en contravia en {self.nombre}"})
 
+        # ---- Objetos que no están dentro en este frame ----
+        # Su racha de entrada se reinicia (deben volver a cumplir k_persistencia para contar).
         for tid in list(self.racha):
             if tid not in ids_dentro:
                 self.racha[tid] = 0
+        # Una visita se cierra solo tras `tolerancia_salida` frames procesados sin verse dentro:
+        # así una oclusión breve o un fallo puntual del detector no parte la visita en dos.
         for tid in list(self.visitas_activas):
             if idx - self.ultimo_dentro[tid] > p.tolerancia_salida * p.salto_frames:
                 self._cerrar(tid, clase_de)
         self.ocupacion = len(ids_dentro & set(self.visitas_activas))
 
     def permanencia_actual(self, tid, idx):
+        """Segundos que lleva el ID dentro de la ROI, o None si no tiene una visita activa."""
         v = self.visitas_activas.get(tid)
         return None if v is None else (idx - v["frame_entrada"]) / self.s.fps
 
     def _cerrar(self, tid, clase_de):
+        """Pasa una visita activa a la lista de visitas cerradas con sus métricas finales."""
         fps = self.s.fps
         v = self.visitas_activas.pop(tid)
         v["clase"] = clase_de(tid)
@@ -197,6 +237,7 @@ class MonitorROI:
         self.visitas.append(v)
 
     def cerrar_todo(self, clase_de):
+        """Cierra las visitas que seguían abiertas al terminar el video."""
         for tid in list(self.visitas_activas):
             self._cerrar(tid, clase_de)
 
@@ -219,6 +260,8 @@ class SistemaMonitor:
         info = sv.VideoInfo.from_video_path(ruta_video)
         self.W, self.H, self.fps, self.total_frames = info.width, info.height, info.fps, info.total_frames
         self.fps_efectivo = self.fps / self.p.salto_frames
+        # Factores de escala respecto a 704x480: todo lo definido en píxeles base (ROI, grosores,
+        # textos, umbrales de desplazamiento) se adapta a la resolución real del video.
         ex, ey = self.W / RES_BASE[0], self.H / RES_BASE[1]
         self.escala = (ex + ey) / 2
         self.min_desplazamiento = self.p.min_desplazamiento_base * self.escala
@@ -231,6 +274,7 @@ class SistemaMonitor:
             r = copy.deepcopy(r)
             r["poligono"] = (np.array(r["poligono"]) * [ex, ey]).round().astype(np.int32)
             if r["sentido"] is not None:
+                # Si el aspecto cambia (ex ≠ ey) el vector de sentido también se deforma: se escala y renormaliza.
                 v = np.array(r["sentido"]) * [ex, ey]
                 r["sentido"] = tuple(float(x) for x in v / np.linalg.norm(v))
             self.rois[k] = r
@@ -239,6 +283,7 @@ class SistemaMonitor:
         pts = GARRAFONES_1080 * np.float32([self.W / 1920, self.H / 1080])
         self.M = cv2.getPerspectiveTransform(pts, GARRAFONES_MUNDO)
 
+        # Anotadores de Supervision: cajas, etiquetas y trazas coloreadas por clase.
         e = self.escala
         self.anot_cajas = sv.BoxAnnotator(color=PALETA_CLASES, color_lookup=sv.ColorLookup.CLASS, thickness=max(2, round(2 * e)))
         self.anot_etiquetas = sv.LabelAnnotator(color=PALETA_CLASES, color_lookup=sv.ColorLookup.CLASS, text_scale=0.4 * e,
@@ -249,25 +294,36 @@ class SistemaMonitor:
     # ---------- utilidades ----------
     @property
     def modelo(self):
+        """Modelo YOLO cargado de forma perezosa y cacheado a nivel de clase (se reutiliza entre ejecuciones)."""
         if self.p.modelo not in SistemaMonitor._modelos:
             SistemaMonitor._modelos[self.p.modelo] = YOLO(self.p.modelo)
         return SistemaMonitor._modelos[self.p.modelo]
 
     def velocidad_kmh(self, p0, p1, dt):
+        """Velocidad (km/h) entre dos puntos de imagen separados `dt` segundos, o None si no es medible."""
+        # Píxeles → metros en el plano de la calzada.
         (X0, Y0), (X1, Y1) = cv2.perspectiveTransform(np.float32([[p0], [p1]]), self.M).reshape(2, 2)
         zx, zy = self.p.zona_calibrada_x, self.p.zona_calibrada_y
+        # Fuera de la zona entre los garrafones la homografía extrapola y el error crece: se descarta.
         en_zona = lambda X, Y: zx[0] <= X <= zx[1] and zy[0] <= Y <= zy[1]
         if dt <= 0 or not (en_zona(X0, Y0) and en_zona(X1, Y1)):
             return None
-        return float(np.hypot(X1 - X0, Y1 - Y0) / dt * 3.6)
+        return float(np.hypot(X1 - X0, Y1 - Y0) / dt * 3.6)   # m/s → km/h
 
     def filtrar_conductores(self, det):
+        """Elimina las 'personas' que en realidad son conductores de moto o bicicleta.
+
+        YOLO detecta por separado a la persona y al vehículo de dos ruedas; sin este filtro el
+        conductor se contaría como peatón. Se descarta la persona cuya caja queda cubierta en más
+        de `umbral_conductor` por la caja de una moto/bici (intersección / área de la persona).
+        """
         if len(det) == 0:
             return det
         es_persona, es_rueda = det.class_id == 0, np.isin(det.class_id, [1, 3])
         if not es_persona.any() or not es_rueda.any():
             return det
         P, R = det.xyxy[es_persona], det.xyxy[es_rueda]
+        # Intersección vectorizada de todas las parejas persona × rueda (broadcasting P[:, None] vs R[None, :]).
         ix = np.clip(np.minimum(P[:, None, 2], R[None, :, 2]) - np.maximum(P[:, None, 0], R[None, :, 0]), 0, None)
         iy = np.clip(np.minimum(P[:, None, 3], R[None, :, 3]) - np.maximum(P[:, None, 1], R[None, :, 1]), 0, None)
         area = (P[:, 2] - P[:, 0]) * (P[:, 3] - P[:, 1])
@@ -277,6 +333,7 @@ class SistemaMonitor:
         return det[mantener]
 
     def leer_frame(self, n=0):
+        """Lee un único frame (por defecto el primero) para la vista previa."""
         cap = cv2.VideoCapture(self.ruta)
         cap.set(cv2.CAP_PROP_POS_FRAMES, n)
         ok, frame = cap.read()
@@ -285,6 +342,7 @@ class SistemaMonitor:
 
     # ---------- dibujo ----------
     def dibujar_rois(self, img, alpha=0.25):
+        """Dibuja las ROI semitransparentes, su letra y una flecha con el sentido permitido."""
         e = self.escala
         capa = img.copy()
         for r in self.rois.values():
@@ -302,6 +360,7 @@ class SistemaMonitor:
         return img
 
     def _panel(self, img, monitores, alertas, t):
+        """Panel semitransparente arriba a la izquierda: tiempo, conteo por ROI, ocupación y alertas."""
         e = self.escala
         px = lambda v: int(round(v * e))
         x0, y0, ancho, alto = px(6), px(6), px(292), px(20 + 17 * (len(monitores) + 1))
@@ -322,6 +381,7 @@ class SistemaMonitor:
         return img
 
     def _banner(self, img, alertas, t):
+        """Banner rojo inferior con la última alerta, visible durante 3 s tras producirse."""
         recientes = [a for a in alertas if 0 <= t - a["t_s"] <= 3.0]
         if not recientes:
             return img
@@ -335,8 +395,10 @@ class SistemaMonitor:
         return img
 
     def _anotar(self, frame, det, idx, monitores, alertas, clase_de):
+        """Compone el frame de salida: ROI + trazas + cajas + etiquetas + marcos de alerta + panel + banner."""
         img = self.dibujar_rois(frame, alpha=0.22)
         if len(det):
+            # Etiqueta de cada objeto: "#ID clase [permanencia s] [velocidad km/h]"
             etiquetas = []
             for tid in det.tracker_id:
                 tid = int(tid)
@@ -351,6 +413,7 @@ class SistemaMonitor:
             img = self.anot_trazas.annotate(img, det)
             img = self.anot_cajas.annotate(img, det)
             img = self.anot_etiquetas.annotate(img, det, labels=etiquetas)
+            # Marco rojo extra alrededor de los objetos que dispararon alguna alerta.
             con_alerta = set().union(*[m.en_contravia | m.alerta_permanencia | m.alerta_velocidad for m in monitores])
             d = int(3 * self.escala)
             for (x1, y1, x2, y2), tid in zip(det.xyxy.astype(int), det.tracker_id):
@@ -364,38 +427,49 @@ class SistemaMonitor:
         """Procesa el video. `progreso(fraccion, texto)` se llama periódicamente (para la barra de Streamlit)."""
         p = self.p
         fin = self.total_frames if not max_segundos else min(self.total_frames, int(max_segundos * self.fps))
+        # ByteTrack asigna un ID persistente a cada objeto entre frames; un track perdido se
+        # conserva ~2 s por si el objeto reaparece (oclusiones detrás de otros vehículos).
         tracker = sv.ByteTrack(frame_rate=self.fps_efectivo, lost_track_buffer=int(2 * self.fps_efectivo),
                                track_activation_threshold=0.25)
         monitores = [MonitorROI(k, cfg, self) for k, cfg in self.rois.items()]
-        historial = defaultdict(lambda: deque(maxlen=p.ventana))
-        votos = defaultdict(Counter)
+        historial = defaultdict(lambda: deque(maxlen=p.ventana))   # Últimas posiciones (frame, x, y) por ID
+        votos = defaultdict(Counter)                               # Votos de clase por ID
         alertas, serie = [], []
+        # La clase de un ID es la más votada a lo largo de su vida: evita que un auto "parpadee" a camión.
         clase_de = lambda tid: CLASES[votos[tid].most_common(1)[0][0]] if votos[tid] else "?"
 
         cap = cv2.VideoCapture(self.ruta)
+        # El video de salida solo contiene los frames procesados, por eso se escribe a fps_efectivo.
         info_salida = sv.VideoInfo(width=self.W, height=self.H, fps=self.fps_efectivo)
-        idx = n = 0
+        idx = n = 0                                                # idx: frame leído · n: frames procesados
         with sv.VideoSink(target_path=ruta_salida, video_info=info_salida) as sink:
             while idx < fin:
                 ok, frame = cap.read()
                 if not ok:
                     break
                 if idx % p.salto_frames == 0:
+                    # 1) Detección YOLO (solo clases de interés) + filtro de conductores
                     res = self.modelo(frame, classes=list(CLASES), conf=p.conf, imgsz=p.imgsz, verbose=False)[0]
                     det = self.filtrar_conductores(sv.Detections.from_ultralytics(res))
+                    # 2) Tracking: asocia las detecciones con IDs persistentes
                     det = tracker.update_with_detections(det)
+                    # 3) Votación de clase e historial de posiciones (punto de apoyo en el suelo)
                     anclas = det.get_anchors_coordinates(sv.Position.BOTTOM_CENTER) if len(det) else []
                     for tid, cid, (x, y) in zip(det.tracker_id, det.class_id, anclas):
                         votos[int(tid)][int(cid)] += 1
                         historial[int(tid)].append((idx, float(x), float(y)))
                     if len(det):
+                        # Sustituye la clase del frame por la clase estable (votada) de cada ID
                         det.class_id = np.array([votos[int(t)].most_common(1)[0][0] for t in det.tracker_id])
+                    # 4) Lógica de cada ROI: conteo, permanencia, velocidad, contravía y alertas
                     for m in monitores:
                         m.actualizar(det, idx, clase_de, historial, alertas)
+                    # 5) Serie temporal (acumulado y ocupación por ROI en cada frame procesado)
                     fila = {"frame": idx, "t_s": round(idx / self.fps, 3)}
                     for m in monitores:
                         fila[f"total_{m.clave}"], fila[f"ocupacion_{m.clave}"] = len(m.contados), m.ocupacion
                     serie.append(fila)
+                    # 6) Frame anotado al video de salida
                     sink.write_frame(self._anotar(frame, det, idx, monitores, alertas, clase_de))
                     n += 1
                     if progreso and n % 10 == 0:
@@ -418,10 +492,12 @@ class Resultados:
         self.visitas = (pd.DataFrame([v for m in monitores for v in m.visitas]).reindex(columns=COLUMNAS_VISITAS)
                         .sort_values(["t_entrada_s", "roi"]).reset_index(drop=True))
         self.alertas = pd.DataFrame(alertas, columns=["t_s", "frame", "tipo", "roi", "id", "clase", "detalle"])
+        # Total de objetos: solo IDs vistos en ≥ k_persistencia frames (descarta tracks espurios de 1-2 frames).
         ids_validos = [t for t, v in votos.items() if sum(v.values()) >= sistema.p.k_persistencia]
         self.total_por_clase = pd.Series(Counter(clase_de(t) for t in ids_validos), dtype="int64").sort_values(ascending=False)
         self.total_objetos = len(ids_validos)
 
+        # Tabla resumen: una fila por ROI activa.
         nombres = {m.clave: m.nombre for m in monitores}
         v = self.visitas
         self.resumen = pd.DataFrame({
@@ -434,15 +510,18 @@ class Resultados:
             "Contravías": [int(v.loc[v.roi == k, "contravia"].fillna(False).astype(bool).sum()) for k in nombres],
             "Alertas": [int((self.alertas.roi == k).sum()) for k in nombres],
         })
+        # Conteo por clase × ROI con objetos únicos (un mismo ID que reingresa cuenta una sola vez).
         unicos = v.drop_duplicates(["roi", "id"])
         self.conteo_clase = (pd.crosstab(unicos["clase"], unicos["roi"]).rename(columns=nombres)
                              if len(unicos) else pd.DataFrame())
         if len(self.conteo_clase):
             self.conteo_clase["TOTAL"] = self.conteo_clase.sum(axis=1)
             self.conteo_clase = self.conteo_clase.sort_values("TOTAL", ascending=False)
+        # Velocidades válidas: solo carril A (zona calibrada) y solo vehículos.
         self.velocidades = v[(v.roi == "A") & v.velocidad_kmh.notna() & (v.clase != "persona")]
 
     def estadisticas(self):
+        """KPIs globales que la interfaz muestra en la fila de métricas."""
         v = self.visitas
         return {
             "total_objetos": self.total_objetos,
@@ -468,6 +547,7 @@ class Resultados:
 
 def convertir_h264(origen, destino):
     """Convierte el video (mp4v) a H.264 para que el navegador lo reproduzca. Devuelve la ruta usable."""
+    # Usa el ffmpeg del sistema; si no hay, el binario que trae imageio-ffmpeg; si tampoco, devuelve el original.
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         try:
