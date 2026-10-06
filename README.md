@@ -33,7 +33,6 @@ YOLO11 + ByteTrack + tres ROI, con conteo, permanencia, contravía, velocidad y 
 
 1. En la barra lateral, elegir el video: el del proyecto o uno subido desde la interfaz. Tiene que ser de la misma cámara y con el mismo encuadre.
 2. Ajustar los parámetros si hace falta:
-   - Modelo YOLO.
    - Confianza mínima.
    - Salto de frames.
    - ROI activas.

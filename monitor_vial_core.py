@@ -74,7 +74,7 @@ PALETA_CLASES = sv.ColorPalette.from_hex(
 @dataclass
 class Parametros:
     # --- Detección ---
-    modelo: str = "yolo11s.pt"          # Pesos de YOLO11 (n / s / m)
+    modelo: str = "yolo11s.pt"          # Pesos de YOLO11s (incluidos en el repo)
     conf: float = 0.25                  # Confianza mínima de una detección
     imgsz: int = 704                    # Tamaño de entrada de la red
     salto_frames: int = 2               # Procesar 1 de cada N frames

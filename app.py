@@ -92,8 +92,9 @@ with st.sidebar:
 
     # ---------- 2. Detección (YOLO) ----------
     st.subheader(":material/center_focus_strong: 2 · Detección", divider="gray")
-    modelo = st.selectbox("Modelo YOLO", ["yolo11n.pt", "yolo11s.pt", "yolo11m.pt"], index=1,
-                          help="n: más rápido · s: equilibrio (usado en el proyecto) · m: más preciso, requiere GPU")
+    # Modelo fijo: YOLO11s (el del proyecto, incluido en el repo; equilibrio entre precisión y velocidad en CPU).
+    modelo = "yolo11s.pt"
+    st.caption(":material/memory: Modelo: **YOLO11s**")
     conf = st.slider("Confianza mínima", 0.10, 0.80, 0.25, 0.05,
                      help="Detecciones con menor confianza se descartan. Más alto = menos falsos positivos, más objetos perdidos.")
     salto = st.select_slider("Procesar 1 de cada N frames", options=[1, 2, 3, 4], value=2,
