@@ -4,7 +4,7 @@ torch
 torchvision
 ultralytics
 supervision<0.31
-opencv-python-headless
+opencv-python
 pandas
 numpy
 streamlit>=1.50

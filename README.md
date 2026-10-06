@@ -56,7 +56,7 @@ Archivos de despliegue:
 | Archivo | Para qué sirve |
 |---|---|
 | `requirements.txt` | Dependencias de Python (PyTorch en versión CPU) |
-| `packages.txt` | Librería del sistema `libgl1`, que necesita OpenCV |
+| `packages.txt` | Librerías del sistema (`libgl1`, `libglib2.0-0`) que necesita OpenCV |
 | `.streamlit/config.toml` | Tema visual de la interfaz |
 | `video_calle.mp4` | Video del proyecto, disponible en la app sin subir nada |
 
