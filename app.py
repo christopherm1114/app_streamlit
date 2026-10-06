@@ -110,8 +110,9 @@ with st.sidebar:
 
     # ---------- 4. Duración a procesar ----------
     st.subheader(":material/schedule: 4 · Duración", divider="gray")
-    max_seg = st.number_input("Procesar solo los primeros N segundos", 0, 7200, 0, 10,
-                              help="0 = todo el video. Útil para pruebas rápidas.")
+    # Por defecto 30 s: en la CPU de Streamlit Community Cloud el video completo tardaría varios minutos.
+    max_seg = st.number_input("Procesar solo los primeros N segundos", 0, 7200, 30, 10,
+                              help="0 = todo el video. En la versión web conviene ≤ 60 s (se procesa en CPU).")
 
 # =====================================================================
 # Encabezado del contenido principal

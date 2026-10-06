@@ -1,9 +1,13 @@
+# PyTorch solo CPU (mucho más liviano que la versión CUDA; Streamlit Community Cloud no tiene GPU)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
 ultralytics
 supervision<0.31
-opencv-python
+opencv-python-headless
 pandas
 numpy
-streamlit
+streamlit>=1.50
 altair
 openpyxl
 imageio-ffmpeg

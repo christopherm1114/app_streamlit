@@ -19,7 +19,7 @@ YOLO11 + ByteTrack + tres ROI, con conteo, permanencia, contravía, velocidad y 
    pip install -r requirements.txt
    ```
 
-2. Copiar `video_calle.mp4` en esta misma carpeta. Es opcional: también se puede subir un video desde la interfaz.
+2. El video del proyecto (`video_calle.mp4`) ya está incluido en esta carpeta. También se puede subir otro video desde la interfaz.
 
 3. Iniciar la aplicación:
 
@@ -46,6 +46,19 @@ YOLO11 + ByteTrack + tres ROI, con conteo, permanencia, contravía, velocidad y 
    - Estadísticas finales: total de objetos, visitas por ROI, permanencia media, velocidad media, contravías y alertas.
    - Pestañas de detalle.
 6. Descargar el Excel, los CSV o el video procesado.
+
+## Versión web (Streamlit Community Cloud)
+
+La app está desplegada en Streamlit Community Cloud. No requiere instalar nada: el procesamiento corre en la CPU del servidor, así que por defecto se procesan solo los primeros 30 s del video.
+
+Archivos de despliegue:
+
+| Archivo | Para qué sirve |
+|---|---|
+| `requirements.txt` | Dependencias de Python (PyTorch en versión CPU) |
+| `packages.txt` | Librería del sistema `libgl1`, que necesita OpenCV |
+| `.streamlit/config.toml` | Tema visual de la interfaz |
+| `video_calle.mp4` | Video del proyecto, disponible en la app sin subir nada |
 
 ## Tiempos orientativos
 
